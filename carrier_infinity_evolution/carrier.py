@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import xml.etree.ElementTree as ETree
 from contextlib import AsyncExitStack
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List, TypedDict
 
 import aiohttp
 from multidict import CIMultiDict
@@ -26,6 +26,45 @@ class AIOOAuth1Client(aiohttp.ClientRequest):
         self.headers = CIMultiDict(headers)
         if body:
             self.body._value = body.encode('utf-8')
+
+
+class CarrierSystem(TypedDict):
+    system: Dict[str, Any]
+
+
+class CarrierLocation(TypedDict):
+    location: Dict[str, Any]
+    systems: Dict[str, CarrierSystem]  # {system_id: SystemObj
+
+
+class CarrierLocations:
+    def __init__(self, locations: Dict[str, Any]):
+        self._locations_raw = locations
+        self._locations: Dict[str, CarrierLocation] = dict()
+
+        for loc in locations['locations']['location']:
+            loc_id = self._get_id(loc)
+
+            systems = {
+                self._get_id(system): CarrierSystem(system=system)
+                for system in loc['systems']['system']
+            }
+
+            self._locations[loc_id] = CarrierLocation(location=loc, systems=systems)
+
+    @staticmethod
+    def _get_id(obj: Dict[str, Any]):
+        obj = obj['atom:link']
+        if isinstance(obj, list):
+            assert len(obj) == 1
+            obj = obj[0]
+
+        return obj['$']['href'].rsplit('/', 1)[-1]
+
+    @property
+    def locations(self) -> Dict[str, CarrierLocation]:
+        return self._locations
+
 
 
 # https://openapi.ing.carrier.com/docs
@@ -75,10 +114,9 @@ class CarrierInfinity:
 
         self._access_token = data['result']['accessToken']
 
-    async def _request(self, method: str = 'get', *, url: str):
+    async def _request(self, method: str = 'get', *, url: yarl.URL):
         await self._ensure_auth()
 
-        url = self._base_url / url
         self._oauth1.resource_owner_key = self._user_name
         self._oauth1.resource_owner_secret = self._access_token
         headers = {
@@ -90,7 +128,15 @@ class CarrierInfinity:
             return await r.json()
 
     async def get_user_info(self):
-        data = await self._request(url=f'users/{self._user_name}')
+        data = await self._request(url=self._base_url / 'users' / self._user_name)
+        return data
+
+    async def get_user_locations(self):
+        data = await self._request(url=self._base_url / 'users'/ self._user_name / 'locations')
+        return CarrierLocations(data)
+
+    async def get_system_energy(self, serial_number: str):
+        data = await self._request(url=self._base_url / 'systems' / serial_number / 'energy')
         return data
 
 
@@ -111,7 +157,11 @@ async def main():
         app_args.base_url, app_args.client_key, app_args.client_secret,
         app_args.user_email, app_args.user_email_password
     ) as carrier:
-        data = await carrier.get_user_info()
+        # data = await carrier.get_user_info()
+        locations = await carrier.get_user_locations()
+
+        system_id = list(list(locations.locations.values())[0]['systems'].keys())[0]
+        data = await carrier.get_system_energy(system_id)
         print(data)
 
 
