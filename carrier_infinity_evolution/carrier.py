@@ -2,12 +2,40 @@ import argparse
 import asyncio
 import xml.etree.ElementTree as ETree
 from contextlib import AsyncExitStack
-from typing import Optional, Any, Dict, List, TypedDict
+from typing import Optional, Any, Dict, TypedDict
+import pprint
+import enum
+from pathlib import Path
 
 import aiohttp
 from multidict import CIMultiDict
 import yarl
 from oauthlib.oauth1.rfc5849 import Client as OAuth1Client
+
+import db
+
+
+class StrEnum(str, enum.Enum):
+    pass
+
+
+@enum.unique
+class CarrierSystemItem(StrEnum):
+    status = 'status'  # this returns a 500
+    profile = 'profile'
+    config = 'config'
+    energy = 'energy'
+    dealer = 'dealer'
+    odu_config = 'odu_config'
+    odu_status = 'odu_status'
+    odu_faults = 'odu_faults'
+    idu_config = 'idu_config'
+    idu_status = 'idu_status'
+    idu_faults = 'idu_faults'
+    history = 'history'
+    equipment_events = 'equipment_events'  # idu + odu faults
+    root_cause = 'root_cause'
+    utility_events = 'utility_events'
 
 
 class AIOOAuth1Client(aiohttp.ClientRequest):
@@ -66,8 +94,6 @@ class CarrierLocations:
         return self._locations
 
 
-
-# https://openapi.ing.carrier.com/docs
 class CarrierInfinity:
     def __init__(self, base_url: yarl.URL, client_key: str, client_secret: str, user_name: str, password: str):
         self._base_url = base_url
@@ -135,8 +161,12 @@ class CarrierInfinity:
         data = await self._request(url=self._base_url / 'users'/ self._user_name / 'locations')
         return CarrierLocations(data)
 
-    async def get_system_energy(self, serial_number: str):
-        data = await self._request(url=self._base_url / 'systems' / serial_number / 'energy')
+    async def get_location(self, location_id: str):
+        data = await self._request(url=self._base_url / 'locations' / location_id)
+        return data
+
+    async def get_system_item(self, serial_number: str, item: CarrierSystemItem):
+        data = await self._request(url=self._base_url / 'systems' / serial_number / item.value)
         return data
 
 
@@ -151,7 +181,10 @@ async def main():
     parser.add_argument('-user_email', type=str, required=True, help='Carrier API User/Email')
     parser.add_argument('-user_email_password', type=str, required=True, help='Carrier API User/Email Password')
 
+    parser.add_argument('-db-path', type=Path, help='Path to store SQLLite3 data to')
     app_args = parser.parse_args()
+
+    db.ensure_database(app_args.db_path)
 
     async with CarrierInfinity(
         app_args.base_url, app_args.client_key, app_args.client_secret,
@@ -159,10 +192,17 @@ async def main():
     ) as carrier:
         # data = await carrier.get_user_info()
         locations = await carrier.get_user_locations()
+        location_id = list(locations.locations.keys())[0]
+        system_id = list(locations.locations[location_id]['systems'].keys())[0]
 
-        system_id = list(list(locations.locations.values())[0]['systems'].keys())[0]
-        data = await carrier.get_system_energy(system_id)
-        print(data)
+        data = await carrier.get_system_item(system_id, CarrierSystemItem.energy)
+        pprint.pprint(data, width=200)
+
+        while True:
+            print("Adding temp...")
+            data = await carrier.get_system_item(system_id, CarrierSystemItem.odu_status)
+            db.write_odu_status(app_args.db_path, data['odu_status'])
+            await asyncio.sleep(20)
 
 
 if __name__ == '__main__':
